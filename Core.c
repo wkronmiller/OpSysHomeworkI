@@ -158,6 +158,8 @@ void execute_command(
 	int input_fd, //Input file descriptor
 	int output_fd, //Output file descriptor
 	bool wait_on_child, //Wait for child process to exit, or continue
+	bool piping, 
+	int * piping_child,
 	int * child_count
 	)
 {
@@ -241,6 +243,22 @@ void execute_command(
 	}
 	else //Parent process
 	{
+		//Close input file descriptor
+		if (input_fd != STDIN_FILENO)
+		{
+			close(input_fd);
+		}
+
+		//Close output file descriptor, set piping_child pid
+		if (output_fd != STDOUT_FILENO)
+		{
+			close(output_fd);
+
+			if (piping)
+			{
+				(*piping_child) = child_pid;
+			}
+		}
 
 		//Check if we wait on child
 		if (wait_on_child)
@@ -251,11 +269,28 @@ void execute_command(
 			{
 				fprintf(stderr, "ERROR: child process returned %u\n", child_retval);
 			}
+
+			//Wait on second child, if piping
+			if (piping)
+			{
+				//Wait on child
+				child_pid = waitpid((*piping_child), &child_retval, 0);
+				(*child_count)--;
+			}
+
+			if (child_retval)
+			{
+				fprintf(stderr, "ERROR: child process returned %u\n", child_retval);
+			}
+
 		}
 		else
 		{
-			//Report child creation
-			printf("\n[process running in background with pid %u\n", child_pid);
+			if (!piping)
+			{
+				//Report child creation
+				printf("\n[process running in background with pid %u\n", child_pid);
+			}
 
 			//Increment child counter
 			(*child_count)++;
@@ -491,28 +526,22 @@ int insert_tokens(char *** p_dest, char * source, int pos)
 
 
 //Search history for text string
-int search_hist_str(char ** hist_arr, int hist_indx, char * search_str)
+int search_hist_str(char ** hist_arr, int hist_indx, char * search_str, int search_str_len)
 {
-	//Variable declarations
-	int arr_index;
-
-	//Variable initialization
-	arr_index = 0;
-
 	//Error-checking
-	if (strlen(search_str) != 3)
+	if (strlen(search_str) <= 0)
 	{
 		return -1;
 	}
 
 	//Loop through history array
-	for (arr_index = 0; arr_index < hist_indx; arr_index++)
+	for (hist_indx-=2; hist_indx >= 0; hist_indx--)
 	{
 		//Compare history string to search string
-		if (strncmp(hist_arr[arr_index], search_str, 3) == 0)
+		if (strncmp(hist_arr[hist_indx], search_str, search_str_len) == 0)
 		{
 			//If match, return index position
-			return arr_index;
+			return hist_indx;
 		}
 	}
 
@@ -655,6 +684,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 		out_fd, //Output file descriptor
 		pipe_fd[2], //Pipe file descriptor array
 		int_buf, //General integer buffer
+		piping_child, //PID of detached child process
 		r_code; //Return code for function calls
 	bool wait, //Boolean determining whether to use blocking wait
 		subarr_set, //Boolean determining whether the command subarray has already been set
@@ -673,6 +703,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 	subarr_set = false;
 	history_reset = false;
 	start_pos = 0;
+	piping_child = 0;
 	in_fd = STDIN_FILENO;
 	out_fd = STDOUT_FILENO;
 
@@ -752,7 +783,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 				start_pos = arr_index + 1;
 
 				//Execute
-				execute_command(execute_subarray, in_fd, out_fd, wait, child_count);
+				execute_command(execute_subarray, in_fd, out_fd, wait, piping, &piping_child, child_count);
 				subarr_set = false;
 
 				//Finish with current command
@@ -862,7 +893,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 				wait = false;
 
 				//Execute
-				execute_command(execute_subarray, in_fd, out_fd, wait, child_count);
+				execute_command(execute_subarray, in_fd, out_fd, wait, piping, &piping_child, child_count);
 				subarr_set = false;
 
 				//Reset pipe flag
@@ -953,7 +984,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 			//Execute queued command
 			if (subarr_set)
 			{
-				execute_command(execute_subarray, in_fd, out_fd, wait, child_count);
+				execute_command(execute_subarray, in_fd, out_fd, wait, piping, &piping_child, child_count);
 				subarr_set = false;
 
 				//Reset pipe flag
@@ -991,37 +1022,6 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 					history_reset = true;
 				}
 			}
-			else if (s_itr_siz == 4)
-			{
-				if ((s_buf = malloc(sizeof(char) * 4)) == NULL)
-				{
-					perror("ERROR: memory allocation failure!");
-					exit(EXIT_FAILURE);
-				}
-
-
-				//Copy in search string
-				sprintf(s_buf, "%c%c%c", s_itr[1], s_itr[2], s_itr[3]);
-
-				//Search history array
-				int_buf = search_hist_str(history, history_index, (s_buf));
-
-				//Cleanup
-				free(s_buf);
-
-				//Check search results
-				if (int_buf == -1)
-				{
-					fprintf(stderr, "ERROR: history item not found\n");
-				}
-				else
-				{
-					//Inject history item into tokenized_input
-					num_tokens += insert_tokens(&tokenized_input, history[int_buf], arr_index);
-					arr_index--; //Decrement array index to re-process new tokens
-					history_reset = true;
-				}
-			}
 			else if (s_itr[1] == '!' && s_itr_siz == 2) // !!
 			{
 				int_buf = history_index - 2;
@@ -1046,6 +1046,48 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 					history_reset = true;
 				}
 			}
+			else
+			{
+				//Generate substring buffer
+				if ((s_buf = malloc(sizeof(char)* 4)) == NULL)
+				{
+					perror("ERROR: memory allocation failure!");
+					exit(EXIT_FAILURE);
+				}
+
+				//Copy in string
+				strcpy(s_buf, s_itr);
+
+				//Chop off !
+				s_buf++;;
+
+				//Get length of substring
+				int_buf = strlen(s_buf);
+				
+				//Search history array
+				int_buf = search_hist_str(history, history_index, s_buf, int_buf);
+
+				//Restore string
+				s_buf--;
+
+				//Cleanup
+				free(s_buf);
+
+				//Check search results
+				if (int_buf == -1)
+				{
+					fprintf(stderr, "ERROR: history item not found\n");
+				}
+				else
+				{
+					//Inject history item into tokenized_input
+					num_tokens += insert_tokens(&tokenized_input, history[int_buf], arr_index);
+					arr_index--; //Decrement array index to re-process new tokens
+					history_reset = true;
+				}
+
+
+			}
 
 			//Reset history array
 			if (history_reset)
@@ -1062,7 +1104,7 @@ void parse_input(char *user_input, bool *continue_loop, int * child_count, char 
 		execute_subarray = gen_command(tokenized_input, start_pos, (arr_index - 1));
 	}
 
-	execute_command(execute_subarray, in_fd, out_fd, wait, child_count);
+	execute_command(execute_subarray, in_fd, out_fd, wait, piping, &piping_child, child_count);
 
 	//Reset pipe flag
 	piping = false;
